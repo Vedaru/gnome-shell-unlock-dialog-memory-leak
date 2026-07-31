@@ -1,0 +1,116 @@
+Description: screenShield: reuse the unlock dialog instead of recreating it
+ Every lock/unlock cycle allocates a brand new UnlockDialog (password entry,
+ clock, notifications box, background actors, GPU-backed Cogl textures) and
+ destroys the old one. GJS/SpiderMonkey does not run garbage collection
+ between cycles, so the destroyed Clutter actor tree's memory accumulates as
+ anonymous heap (Private_Dirty) rather than being reclaimed promptly -
+ roughly 4-10 MB per lock/unlock cycle, growing linearly with usage.
+ .
+ This keeps a single UnlockDialog instance alive for the life of the
+ ScreenShield and just hides/re-shows it instead of destroy()/recreate.
+ The dialog's inner AuthPrompt (the actual verification state) is already
+ lazily created and destroyed by _ensureAuthPrompt()/_maybeDestroyAuthPrompt()
+ in unlockDialog.js on every clock<->prompt page switch, so no stale
+ authentication state is retained across cycles - only the static shell
+ chrome (background, clock, layout) is now reused.
+ .
+ _ensureUnlockDialog() is restructured so dialog construction (and the
+ 'failed'/'wake-up-screen' signal connections) happens only once, while
+ _refreshBackground() and dialog.open() (which shows the actor and
+ acquires/re-acquires the modal grab) run on every call, since those need
+ to happen each time the dialog is (re)shown.
+ .
+ A new resetToClock() method is added to UnlockDialog so that
+ _completeDeactivate() can snap the dialog back to the clock page (and
+ destroy the AuthPrompt) before hiding, preventing stale prompt state
+ from carrying over to the next lock cycle.
+Author: Vedaru <vedaru@localhost>
+Origin: vendor
+Forwarded: not-yet
+Last-Update: 2026-07-31
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/js/ui/screenShield.js
++++ b/js/ui/screenShield.js
+@@ -451,21 +451,25 @@
+             }
+
+             this._dialog = new constructor(this._lockDialogGroup);
+-            this._refreshBackground();
+-
+-            if (!this._dialog.open()) {
+-                // This is kind of an impossible error: we're already modal
+-                // by the time we reach this...
+-                log('Could not open login dialog: failed to acquire grab');
+-                this.deactivate(true);
+-                return false;
+-            }
+
+             this._dialog.connect('failed', this._onUnlockFailed.bind(this));
+             this._wakeUpScreenId = this._dialog.connect(
+                 'wake-up-screen', this._wakeUpScreen.bind(this));
+         }
+
++        // Refresh the background each time we (re)show the dialog, not just
++        // on first creation, since monitors/wallpaper may have changed while
++        // the dialog was hidden.
++        this._refreshBackground();
++
++        if (!this._dialog.open()) {
++            // This is kind of an impossible error: we're already modal
++            // by the time we reach this...
++            log('Could not open login dialog: failed to acquire grab');
++            this.deactivate(true);
++            return false;
++        }
++
+         this._dialog.allowCancel = allowCancel;
+         if (this._isGreeter)
+             this._dialog.activate();
+@@ -606,8 +610,19 @@
+
+     _completeDeactivate() {
+         if (this._dialog) {
+-            this._dialog.destroy();
+-            this._dialog = null;
++            // Hide rather than destroy: _ensureUnlockDialog() rebuilds the
++            // whole widget tree (password entry, clock, notifications,
++            // background) from scratch, and GJS doesn't run GC between
++            // lock/unlock cycles, so the destroyed tree's memory piled up
++            // as ~4-10 MB of anonymous heap per cycle before being
++            // reclaimed. Keeping the dialog around and just hiding it
++            // avoids the reallocation. The dialog's own AuthPrompt child is
++            // still lazily created/destroyed by _ensureAuthPrompt() /
++            // _maybeDestroyAuthPrompt() in unlockDialog.js, so stale
++            // authentication state does not linger.
++            this._dialog.popModal();
++            this._dialog.resetToClock();
++            this._dialog.hide();
+         }
+
+         this.actor.hide();
+--- a/js/ui/unlockDialog.js
++++ b/js/ui/unlockDialog.js
+@@ -1015,6 +1015,22 @@
+         this._showPrompt();
+     }
+
++    resetToClock() {
++        // Used when the dialog is being hidden (not destroyed) so it's
++        // reused on the next lock cycle. Snap straight back to the clock
++        // page with no animation (the dialog isn't visible) and drop the
++        // AuthPrompt, mirroring what _showClock()'s onComplete normally
++        // does. Without this, a dialog left on the password page from a
++        // previous successful unlock re-opens straight to the password
++        // page with a finished/insensitive AuthPrompt, and key presses are
++        // swallowed by vfunc_key_press_event()'s "already on prompt page"
++        // early-return instead of triggering _showPrompt()/_ensureAuthPrompt().
++        this._adjustment.remove_transition('value');
++        this._adjustment.value = 0;
++        this._activePage = this._clock;
++        this._maybeDestroyAuthPrompt();
++    }
++
+     popModal() {
+         if (this._isModal) {
+             Main.popModal(this._grab);
