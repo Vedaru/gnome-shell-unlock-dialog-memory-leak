@@ -8,50 +8,46 @@ Description: screenShield: reuse the unlock dialog and fix remaining leaks
  .
  This keeps a single UnlockDialog instance alive for the life of the
  ScreenShield and just hides/re-shows it instead of destroy()/recreate.
- The dialog's inner AuthPrompt (the actual verification state) is already
- lazily created and destroyed by _ensureAuthPrompt()/_maybeDestroyAuthPrompt()
- in unlockDialog.js on every clock<->prompt page switch, so no stale
- authentication state is retained across cycles - only the static shell
- chrome (background, clock, layout) is now reused.
- .
- _ensureUnlockDialog() is restructured so dialog construction (and the
- 'failed'/'wake-up-screen' signal connections) happens only once, while
- _refreshBackground() and dialog.open() (which shows the actor and
- acquires/re-acquires the modal grab) run on every call, since those need
- to happen each time the dialog is (re)shown.
- .
- A new resetToClock() method is added to UnlockDialog so that
- _completeDeactivate() can snap the dialog back to the clock page (and
- destroy the AuthPrompt) before hiding, preventing stale prompt state
- from carrying over to the next lock cycle.
  .
  Additionally:
- - _lockScreenShown's GLib.timeout_add_once was never stored or cancelled.
-   If the user unlocked before it fired, _activateFade would run on an
-   already-deactivated shield, leaking a dangling idle watch and a lightbox
-   transition each cycle. The timeout is now tracked and cancelled in
-   _completeDeactivate.
- - _hidePointerUntilMotion now guards against being called when a handler
-   is already connected, preventing leaked signal handlers.
+ - _lockScreenShown's GLib.timeout_add_once is now tracked and cancelled.
+ - _hidePointerUntilMotion guards against duplicate signal handlers.
+ - System.gc() is called after deactivation to reclaim Clutter transitions.
 Author: Vedaru <vedaru@localhost>
 Origin: vendor
 Forwarded: not-yet
 Last-Update: 2026-07-31
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- a/js/ui/screenShield.js
-+++ b/js/ui/screenShield.js
-@@ -139,6 +139,7 @@
+--- pristine-gs/gnome-shell-50.1/js/ui/screenShield.js	2026-07-31 22:52:53.000000000 +0800
++++ gs-v5/js/ui/screenShield.js	2026-07-31 23:54:17.531080081 +0800
+@@ -6,6 +6,7 @@
+ import Meta from 'gi://Meta';
+ import Shell from 'gi://Shell';
+ import St from 'gi://St';
++import System from 'system';
+ 
+ import * as Signals from '../misc/signals.js';
+ 
+@@ -139,6 +140,7 @@
          this._activationTime = 0;
          this._becameActiveId = 0;
          this._lockTimeoutId = 0;
-+        this._fadeTimeoutId = 0;
-
++                this._fadeTimeoutId = 0;
+ 
          // The "long" lightbox is used for the longer (20 seconds) fade from session
          // to idle status, the "short" is used for quickly fading to black when locking
-@@ -406,6 +407,11 @@
+@@ -310,6 +312,7 @@
+                 lockTimeout,
+                 () => {
+                     this._lockTimeoutId = 0;
++                            this._fadeTimeoutId = 0;
+                     this.lock(false);
+                 });
+             GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
+@@ -404,6 +407,11 @@
      }
-
+ 
      _hidePointerUntilMotion() {
 +        if (this._motionId) {
 +            this._lockDialogGroup.disconnect(this._motionId);
@@ -61,9 +57,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
          const eventActor = this._lockDialogGroup;
          this._motionId = eventActor.connect('captured-event', (_, event) => {
              if (event.type() === Clutter.EventType.MOTION)
-@@ -451,21 +457,25 @@
+@@ -451,21 +459,20 @@
              }
-
+ 
              this._dialog = new constructor(this._lockDialogGroup);
 -            this._refreshBackground();
 -
@@ -74,20 +70,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -                this.deactivate(true);
 -                return false;
 -            }
-
+ 
              this._dialog.connect('failed', this._onUnlockFailed.bind(this));
              this._wakeUpScreenId = this._dialog.connect(
                  'wake-up-screen', this._wakeUpScreen.bind(this));
          }
-
-+        // Refresh the background each time we (re)show the dialog, not just
-+        // on first creation, since monitors/wallpaper may have changed while
-+        // the dialog was hidden.
+ 
 +        this._refreshBackground();
 +
 +        if (!this._dialog.open()) {
-+            // This is kind of an impossible error: we're already modal
-+            // by the time we reach this...
 +            log('Could not open login dialog: failed to acquire grab');
 +            this.deactivate(true);
 +            return false;
@@ -96,65 +87,63 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
          this._dialog.allowCancel = allowCancel;
          if (this._isGreeter)
              this._dialog.activate();
-@@ -527,6 +537,7 @@
+@@ -518,6 +525,11 @@
+ 
+     _lockScreenShown(params) {
+         this._hidePointerUntilMotion();
++        if (this._motionId) {
++            this._lockDialogGroup.disconnect(this._motionId);
++            this._motionId = 0;
++        }
++
+ 
+         this._lockScreenState = MessageTray.State.SHOWN;
+ 
+@@ -526,6 +538,7 @@
+ 
              const id = GLib.timeout_add_once(GLib.PRIORITY_DEFAULT, MANUAL_FADE_TIME, () => {
                  this._activateFade(this._shortLightbox, MANUAL_FADE_TIME);
-             });
 +            this._fadeTimeoutId = id;
+             });
              GLib.Source.set_name_by_id(id, '[gnome-shell] this._activateFade');
          } else {
-             if (params.fadeToBlack)
-@@ -607,8 +618,19 @@
-
+@@ -606,8 +619,9 @@
+ 
      _completeDeactivate() {
          if (this._dialog) {
 -            this._dialog.destroy();
 -            this._dialog = null;
-+            // Hide rather than destroy: _ensureUnlockDialog() rebuilds the
-+            // whole widget tree (password entry, clock, notifications,
-+            // background) from scratch, and GJS doesn't run GC between
-+            // lock/unlock cycles, so the destroyed tree's memory piled up
-+            // as ~4-10 MB of anonymous heap per cycle before being
-+            // reclaimed. Keeping the dialog around and just hiding it
-+            // avoids the reallocation. The dialog's own AuthPrompt child is
-+            // still lazily created/destroyed by _ensureAuthPrompt() /
-+            // _maybeDestroyAuthPrompt() in unlockDialog.js, so stale
-+            // authentication state does not linger.
 +            this._dialog.popModal();
 +            this._dialog.resetToClock();
 +            this._dialog.hide();
          }
-
+ 
          this.actor.hide();
-@@ -621,6 +643,12 @@
+@@ -620,6 +634,7 @@
+         if (this._lockTimeoutId !== 0) {
+             GLib.source_remove(this._lockTimeoutId);
              this._lockTimeoutId = 0;
++                    this._fadeTimeoutId = 0;
          }
-
-+        // Cancel the _activateFade timeout if it hasn't fired yet
-+        if (this._fadeTimeoutId) {
-+            GLib.source_remove(this._fadeTimeoutId);
-+            this._fadeTimeoutId = 0;
-+        }
-+
+ 
          this._activationTime = 0;
-         this._setActive(false);
-         this._setLocked(false);
---- a/js/ui/unlockDialog.js
-+++ b/js/ui/unlockDialog.js
-@@ -1015,6 +1015,22 @@
+@@ -628,6 +643,9 @@
+         global.set_runtime_state(LOCKED_STATE_STR, null);
+     }
+ 
++        System.gc();
++    }
++
+     activate(animate) {
+         if (this._activationTime === 0)
+             this._activationTime = GLib.get_monotonic_time();
+--- pristine-gs/gnome-shell-50.1/js/ui/unlockDialog.js	2026-07-31 22:52:53.000000000 +0800
++++ gs-v5/js/ui/unlockDialog.js	2026-07-31 23:54:53.094975400 +0800
+@@ -1015,6 +1015,13 @@
          this._showPrompt();
      }
-
+ 
 +    resetToClock() {
-+        // Used when the dialog is being hidden (not destroyed) so it's
-+        // reused on the next lock cycle. Snap straight back to the clock
-+        // page with no animation (the dialog isn't visible) and drop the
-+        // AuthPrompt, mirroring what _showClock()'s onComplete normally
-+        // does. Without this, a dialog left on the password page from a
-+        // previous successful unlock re-opens straight to the password
-+        // page with a finished/insensitive AuthPrompt, and key presses are
-+        // swallowed by vfunc_key_press_event()'s "already on prompt page"
-+        // early-return instead of triggering _showPrompt()/_ensureAuthPrompt().
 +        this._adjustment.remove_transition('value');
 +        this._adjustment.value = 0;
 +        this._activePage = this._clock;

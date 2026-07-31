@@ -1016,15 +1016,6 @@ export const UnlockDialog = GObject.registerClass({
     }
 
     resetToClock() {
-        // Used when the dialog is being hidden (not destroyed) so it's
-        // reused on the next lock cycle. Snap straight back to the clock
-        // page with no animation (the dialog isn't visible) and drop the
-        // AuthPrompt, mirroring what _showClock()'s onComplete normally
-        // does. Without this, a dialog left on the password page from a
-        // previous successful unlock re-opens straight to the password
-        // page with a finished/insensitive AuthPrompt, and key presses are
-        // swallowed by vfunc_key_press_event()'s "already on prompt page"
-        // early-return instead of triggering _showPrompt()/_ensureAuthPrompt().
         this._adjustment.remove_transition('value');
         this._adjustment.value = 0;
         this._activePage = this._clock;

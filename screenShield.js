@@ -6,6 +6,7 @@ import Graphene from 'gi://Graphene';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
+import System from 'system';
 
 import * as Signals from '../misc/signals.js';
 
@@ -139,6 +140,7 @@ export class ScreenShield extends Signals.EventEmitter {
         this._activationTime = 0;
         this._becameActiveId = 0;
         this._lockTimeoutId = 0;
+                this._fadeTimeoutId = 0;
 
         // The "long" lightbox is used for the longer (20 seconds) fade from session
         // to idle status, the "short" is used for quickly fading to black when locking
@@ -310,6 +312,7 @@ export class ScreenShield extends Signals.EventEmitter {
                 lockTimeout,
                 () => {
                     this._lockTimeoutId = 0;
+                            this._fadeTimeoutId = 0;
                     this.lock(false);
                 });
             GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
@@ -404,6 +407,11 @@ export class ScreenShield extends Signals.EventEmitter {
     }
 
     _hidePointerUntilMotion() {
+        if (this._motionId) {
+            this._lockDialogGroup.disconnect(this._motionId);
+            this._motionId = 0;
+        }
+
         const eventActor = this._lockDialogGroup;
         this._motionId = eventActor.connect('captured-event', (_, event) => {
             if (event.type() === Clutter.EventType.MOTION)
@@ -457,14 +465,9 @@ export class ScreenShield extends Signals.EventEmitter {
                 'wake-up-screen', this._wakeUpScreen.bind(this));
         }
 
-        // Refresh the background each time we (re)show the dialog, not just
-        // on first creation, since monitors/wallpaper may have changed while
-        // the dialog was hidden.
         this._refreshBackground();
 
         if (!this._dialog.open()) {
-            // This is kind of an impossible error: we're already modal
-            // by the time we reach this...
             log('Could not open login dialog: failed to acquire grab');
             this.deactivate(true);
             return false;
@@ -522,6 +525,11 @@ export class ScreenShield extends Signals.EventEmitter {
 
     _lockScreenShown(params) {
         this._hidePointerUntilMotion();
+        if (this._motionId) {
+            this._lockDialogGroup.disconnect(this._motionId);
+            this._motionId = 0;
+        }
+
 
         this._lockScreenState = MessageTray.State.SHOWN;
 
@@ -530,6 +538,7 @@ export class ScreenShield extends Signals.EventEmitter {
 
             const id = GLib.timeout_add_once(GLib.PRIORITY_DEFAULT, MANUAL_FADE_TIME, () => {
                 this._activateFade(this._shortLightbox, MANUAL_FADE_TIME);
+            this._fadeTimeoutId = id;
             });
             GLib.Source.set_name_by_id(id, '[gnome-shell] this._activateFade');
         } else {
@@ -610,16 +619,6 @@ export class ScreenShield extends Signals.EventEmitter {
 
     _completeDeactivate() {
         if (this._dialog) {
-            // Hide rather than destroy: _ensureUnlockDialog() rebuilds the
-            // whole widget tree (password entry, clock, notifications,
-            // background) from scratch, and GJS doesn't run GC between
-            // lock/unlock cycles, so the destroyed tree's memory piled up
-            // as ~4-10 MB of anonymous heap per cycle before being
-            // reclaimed. Keeping the dialog around and just hiding it
-            // avoids the reallocation. The dialog's own AuthPrompt child is
-            // still lazily created/destroyed by _ensureAuthPrompt() /
-            // _maybeDestroyAuthPrompt() in unlockDialog.js, so stale
-            // authentication state does not linger.
             this._dialog.popModal();
             this._dialog.resetToClock();
             this._dialog.hide();
@@ -635,12 +634,16 @@ export class ScreenShield extends Signals.EventEmitter {
         if (this._lockTimeoutId !== 0) {
             GLib.source_remove(this._lockTimeoutId);
             this._lockTimeoutId = 0;
+                    this._fadeTimeoutId = 0;
         }
 
         this._activationTime = 0;
         this._setActive(false);
         this._setLocked(false);
         global.set_runtime_state(LOCKED_STATE_STR, null);
+    }
+
+        System.gc();
     }
 
     activate(animate) {
