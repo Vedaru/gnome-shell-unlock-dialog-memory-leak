@@ -1,4 +1,4 @@
-Description: screenShield: reuse the unlock dialog instead of recreating it
+Description: screenShield: reuse the unlock dialog and fix remaining leaks
  Every lock/unlock cycle allocates a brand new UnlockDialog (password entry,
  clock, notifications box, background actors, GPU-backed Cogl textures) and
  destroys the old one. GJS/SpiderMonkey does not run garbage collection
@@ -24,6 +24,15 @@ Description: screenShield: reuse the unlock dialog instead of recreating it
  _completeDeactivate() can snap the dialog back to the clock page (and
  destroy the AuthPrompt) before hiding, preventing stale prompt state
  from carrying over to the next lock cycle.
+ .
+ Additionally:
+ - _lockScreenShown's GLib.timeout_add_once was never stored or cancelled.
+   If the user unlocked before it fired, _activateFade would run on an
+   already-deactivated shield, leaking a dangling idle watch and a lightbox
+   transition each cycle. The timeout is now tracked and cancelled in
+   _completeDeactivate.
+ - _hidePointerUntilMotion now guards against being called when a handler
+   is already connected, preventing leaked signal handlers.
 Author: Vedaru <vedaru@localhost>
 Origin: vendor
 Forwarded: not-yet
@@ -32,7 +41,27 @@ Last-Update: 2026-07-31
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/js/ui/screenShield.js
 +++ b/js/ui/screenShield.js
-@@ -451,21 +451,25 @@
+@@ -139,6 +139,7 @@
+         this._activationTime = 0;
+         this._becameActiveId = 0;
+         this._lockTimeoutId = 0;
++        this._fadeTimeoutId = 0;
+
+         // The "long" lightbox is used for the longer (20 seconds) fade from session
+         // to idle status, the "short" is used for quickly fading to black when locking
+@@ -406,6 +407,11 @@
+     }
+
+     _hidePointerUntilMotion() {
++        if (this._motionId) {
++            this._lockDialogGroup.disconnect(this._motionId);
++            this._motionId = 0;
++        }
++
+         const eventActor = this._lockDialogGroup;
+         this._motionId = eventActor.connect('captured-event', (_, event) => {
+             if (event.type() === Clutter.EventType.MOTION)
+@@ -451,21 +457,25 @@
              }
 
              this._dialog = new constructor(this._lockDialogGroup);
@@ -67,7 +96,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
          this._dialog.allowCancel = allowCancel;
          if (this._isGreeter)
              this._dialog.activate();
-@@ -606,8 +610,19 @@
+@@ -527,6 +537,7 @@
+             const id = GLib.timeout_add_once(GLib.PRIORITY_DEFAULT, MANUAL_FADE_TIME, () => {
+                 this._activateFade(this._shortLightbox, MANUAL_FADE_TIME);
+             });
++            this._fadeTimeoutId = id;
+             GLib.Source.set_name_by_id(id, '[gnome-shell] this._activateFade');
+         } else {
+             if (params.fadeToBlack)
+@@ -607,8 +618,19 @@
 
      _completeDeactivate() {
          if (this._dialog) {
@@ -89,6 +126,19 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
          }
 
          this.actor.hide();
+@@ -621,6 +643,12 @@
+             this._lockTimeoutId = 0;
+         }
+
++        // Cancel the _activateFade timeout if it hasn't fired yet
++        if (this._fadeTimeoutId) {
++            GLib.source_remove(this._fadeTimeoutId);
++            this._fadeTimeoutId = 0;
++        }
++
+         this._activationTime = 0;
+         this._setActive(false);
+         this._setLocked(false);
 --- a/js/ui/unlockDialog.js
 +++ b/js/ui/unlockDialog.js
 @@ -1015,6 +1015,22 @@
