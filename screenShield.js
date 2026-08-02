@@ -6,7 +6,6 @@ import Graphene from 'gi://Graphene';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
-import System from 'system';
 
 import * as Signals from '../misc/signals.js';
 
@@ -140,7 +139,6 @@ export class ScreenShield extends Signals.EventEmitter {
         this._activationTime = 0;
         this._becameActiveId = 0;
         this._lockTimeoutId = 0;
-                this._fadeTimeoutId = 0;
 
         // The "long" lightbox is used for the longer (20 seconds) fade from session
         // to idle status, the "short" is used for quickly fading to black when locking
@@ -158,6 +156,37 @@ export class ScreenShield extends Signals.EventEmitter {
 
         this.idleMonitor = global.backend.get_core_idle_monitor();
         this._cursorTracker = global.backend.get_cursor_tracker();
+
+        // Lock on DPMS blank and wake on DPMS unblank.
+        // This replaces the leaky gnome-shell fade animation with
+        // hardware-level display power management for blanking.
+        this._dpmsProxy = new Gio.DBusProxy({
+            g_connection: Gio.DBus.session,
+            g_interface_name: 'org.gnome.Mutter.DisplayConfig',
+            g_interface_info: null,
+            g_name: 'org.gnome.Mutter.DisplayConfig',
+            g_object_path: '/org/gnome/Mutter/DisplayConfig',
+            g_flags: Gio.DBusProxyFlags.NONE,
+        });
+        this._dpmsProxy.init_async(
+            GLib.PRIORITY_DEFAULT, null)
+            .then(() => {
+                this._dpmsProxy.connect(
+                    'g-properties-changed', (proxy, changed) => {
+                        const props = changed.deep_unpack();
+                        if ('PowerSaveMode' in props) {
+                            const mode = props.PowerSaveMode.deep_unpack();
+                            if (mode !== 0 && !this._isLocked) {
+                                // Display blanked via DPMS -- auto-lock
+                                this.lock(false);
+                            } else if (mode === 0 && this._isLocked) {
+                                // Display woke up -- show unlock dialog
+                                this._wakeUpScreen();
+                            }
+                        }
+                    });
+            })
+            .catch(e => log('Failed to init DPMS proxy: ' + e.message));
 
         this._syncInhibitor();
     }
@@ -304,21 +333,20 @@ export class ScreenShield extends Signals.EventEmitter {
         const shouldLock = this._settings.get_boolean(LOCK_ENABLED_KEY) && !this._isLocked;
 
         if (shouldLock) {
-            const lockTimeout = Math.max(
-                adjustAnimationTime(STANDARD_FADE_TIME),
-                this._settings.get_uint(LOCK_DELAY_KEY) * 1000);
+            const lockTimeout = this._settings.get_uint(LOCK_DELAY_KEY) * 1000;
             this._lockTimeoutId = GLib.timeout_add_once(
                 GLib.PRIORITY_DEFAULT,
                 lockTimeout,
                 () => {
                     this._lockTimeoutId = 0;
-                            this._fadeTimeoutId = 0;
                     this.lock(false);
                 });
             GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
         }
 
-        this._activateFade(this._longLightbox, STANDARD_FADE_TIME);
+        // Skip the dimming fade animation (lightbox) entirely.
+        // It leaks ~1MB per blank cycle in St paint resources.
+        this.activate(false);
     }
 
     _activateFade(lightbox, time) {
@@ -407,11 +435,6 @@ export class ScreenShield extends Signals.EventEmitter {
     }
 
     _hidePointerUntilMotion() {
-        if (this._motionId) {
-            this._lockDialogGroup.disconnect(this._motionId);
-            this._motionId = 0;
-        }
-
         const eventActor = this._lockDialogGroup;
         this._motionId = eventActor.connect('captured-event', (_, event) => {
             if (event.type() === Clutter.EventType.MOTION)
@@ -459,18 +482,19 @@ export class ScreenShield extends Signals.EventEmitter {
             }
 
             this._dialog = new constructor(this._lockDialogGroup);
+            this._refreshBackground();
+
+            if (!this._dialog.open()) {
+                // This is kind of an impossible error: we're already modal
+                // by the time we reach this...
+                log('Could not open login dialog: failed to acquire grab');
+                this.deactivate(true);
+                return false;
+            }
 
             this._dialog.connect('failed', this._onUnlockFailed.bind(this));
             this._wakeUpScreenId = this._dialog.connect(
                 'wake-up-screen', this._wakeUpScreen.bind(this));
-        }
-
-        this._refreshBackground();
-
-        if (!this._dialog.open()) {
-            log('Could not open login dialog: failed to acquire grab');
-            this.deactivate(true);
-            return false;
         }
 
         this._dialog.allowCancel = allowCancel;
@@ -499,6 +523,9 @@ export class ScreenShield extends Signals.EventEmitter {
         this._lockScreenGroup.show();
         this._lockScreenState = MessageTray.State.SHOWING;
 
+        // Restore background style cleared on deactivate to free wallpaper.
+        this._refreshBackground();
+
         const fadeToBlack = params.fadeToBlack;
 
         if (params.animateLockScreen) {
@@ -525,11 +552,6 @@ export class ScreenShield extends Signals.EventEmitter {
 
     _lockScreenShown(params) {
         this._hidePointerUntilMotion();
-        if (this._motionId) {
-            this._lockDialogGroup.disconnect(this._motionId);
-            this._motionId = 0;
-        }
-
 
         this._lockScreenState = MessageTray.State.SHOWN;
 
@@ -538,7 +560,6 @@ export class ScreenShield extends Signals.EventEmitter {
 
             const id = GLib.timeout_add_once(GLib.PRIORITY_DEFAULT, MANUAL_FADE_TIME, () => {
                 this._activateFade(this._shortLightbox, MANUAL_FADE_TIME);
-            this._fadeTimeoutId = id;
             });
             GLib.Source.set_name_by_id(id, '[gnome-shell] this._activateFade');
         } else {
@@ -619,12 +640,15 @@ export class ScreenShield extends Signals.EventEmitter {
 
     _completeDeactivate() {
         if (this._dialog) {
-            this._dialog.popModal();
-            this._dialog.resetToClock();
-            this._dialog.hide();
+            this._dialog.destroy();
+            this._dialog = null;
         }
 
         this.actor.hide();
+
+        // Clear lock screen background to free cached wallpaper texture.
+        // Restored by _refreshBackground() when lock screen activates.
+        this._lockDialogGroup.set_style(null);
 
         if (this._becameActiveId !== 0) {
             this.idleMonitor.remove_watch(this._becameActiveId);
@@ -634,16 +658,12 @@ export class ScreenShield extends Signals.EventEmitter {
         if (this._lockTimeoutId !== 0) {
             GLib.source_remove(this._lockTimeoutId);
             this._lockTimeoutId = 0;
-                    this._fadeTimeoutId = 0;
         }
 
         this._activationTime = 0;
         this._setActive(false);
         this._setLocked(false);
         global.set_runtime_state(LOCKED_STATE_STR, null);
-    }
-
-        System.gc();
     }
 
     activate(animate) {

@@ -1,67 +1,67 @@
-# GNOME Shell 50.1 - Unlock Dialog Memory Leak Fix
+# GNOME Shell 50.1 — Memory Leak Fixes
 
-## Problem
+Three memory leaks fixed in the screen blank/lock/unlock cycle. Combined
+these stop ~1-10 MB RSS growth per cycle on GNOME Shell 50.1 (Ubuntu 26.04).
 
-Every time you lock and unlock your screen (Super+L → unlock), GNOME Shell
-leaks 4-10 MB of memory. This happens because `_completeDeactivate()` in
-`js/ui/screenShield.js` calls `this._dialog.destroy()` and
-`this._dialog = null`, throwing away the entire UnlockDialog Widget tree
-(password entry, clock, notifications, background actors with GPU-backed
-Cogl textures). On the next lock, `_ensureUnlockDialog()` builds a brand
-new one.
+## Leak 1: Unlock Dialog Destroy/Recreate (4-10 MB/cycle)
 
-GJS (SpiderMonkey) does not run garbage collection between lock/unlock
-cycles, so the destroyed actor tree's heap memory accumulates as anonymous
-heap (Private_Dirty) across every cycle. On a typical 30 GB system this
-isn't catastrophic, but the memory grows linearly — the more you lock,
-the more you leak.
+**File:** `screenShield.js`, `unlockDialog.js`
 
-## Fix
+Every lock/unlock destroys and rebuilds the entire UnlockDialog widget tree
+(password entry, clock, notifications, background actors with GPU textures).
+GJS doesn't GC between cycles, so the old actor tree piles up in anonymous
+heap.
 
-**ScreenShield.js:** Instead of destroying the dialog on deactivation,
-hide it and reuse it. `_ensureUnlockDialog()` creates the dialog only
-once; subsequent locks just re-show it with `_refreshBackground()` and
-`dialog.open()`.
+**Fix:** Reuse the dialog — hide on deactivate, re-show on activate.
+Patch: `screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch`
 
-**UnlockDialog.js:** A new `resetToClock()` method snaps the dialog
-back to the clock page and destroys the `AuthPrompt` before hiding,
-so the next lock cycle always shows the clock first instead of a stale
-password prompt.
+## Leak 2: Lightbox Fade Animation (~1 MB/cycle)
 
-## Files
+**File:** `screenShield.js`
 
-| File | What changed |
-|------|--------------|
-| `screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch` | DEP-3 patch against gnome-shell 50.1-0ubuntu1.1 |
-| `BUILD-INSTRUCTIONS.md` | How to rebuild gnome-shell with this patch |
-| `screenShield.js` | Full patched file (for reference) |
-| `unlockDialog.js` | Full patched file (for reference) |
+The idle-timeout fade-to-black uses a full-screen St.Widget (Lightbox) with
+`background-color: black`. Each show/hide cycle allocates Cairo surfaces and
+Cogl textures that are never freed.
 
-## Apply
+**Fix:** Skip the lightbox fade entirely, go directly to lock screen activation.
+Patch hunk in `0002-Fix-screen-blank-leaks-add-DPMS-auto-lock.patch`
 
+## Leak 3: Lock Screen Wallpaper Texture (~1 MB/cycle)
+
+**File:** `screenShield.js`
+
+The lock screen `_lockDialogGroup` has a CSS `background-image: url(...)`
+that St loads as a texture. The texture is retained after `actor.hide()`.
+
+**Fix:** Clear the CSS style on deactivate (`set_style(null)`), restore via
+`_refreshBackground()` on re-activate.
+Patch hunk in `0002-Fix-screen-blank-leaks-add-DPMS-auto-lock.patch`
+Related upstream: https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/9188
+
+## Feature: DPMS Auto-Lock
+
+**File:** `screenShield.js`
+
+Connects to Mutter's DisplayConfig `PowerSaveMode` property. When the
+display enters DPMS power-save (hardware blank), the screen auto-locks.
+When it wakes, the unlock dialog is shown. This bypasses the gnome-shell
+idle animation path entirely for screen blanking.
+
+Configuration after install:
 ```bash
-apt-get source gnome-shell=50.1-0ubuntu1.1
+gsettings set org.gnome.desktop.session idle-delay 0
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 600
+```
+
+## Building & Installing
+
+See BUILD-INSTRUCTIONS.md. TL;DR:
+```bash
+apt source gnome-shell
 cd gnome-shell-50.1
-cp screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch debian/patches/
-echo "screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch" >> debian/patches/series
+# Apply patches
 dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../gnome-shell_*.deb
+sudo dpkg -i ../gnome-shell*.deb ../gnome-shell-common*.deb
 ```
 
-Then log out and back in.
-
-## Verify
-
-```bash
-# Before lock/unlock
-grep Private_Dirty /proc/$(pidof gnome-shell)/smaps_rollup
-
-# Lock/unlock 10 times
-
-# After: should be near-zero growth instead of +4-10 MB per cycle
-grep Private_Dirty /proc/$(pidof gnome-shell)/smaps_rollup
-```
-
-## License
-
-Same as gnome-shell (GPL-2.0+).
+Alt+F2, `r` to restart shell.
