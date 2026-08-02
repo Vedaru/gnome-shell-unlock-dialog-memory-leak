@@ -291,8 +291,7 @@ export class ScreenShield extends Signals.EventEmitter {
             this._activationTime = GLib.get_monotonic_time();
 
         if (!this._isLocked) {
-            // Blank display via DPMS first, then delegate to GDM.
-            // On wake, GDM greeter will be showing.
+            // Blank display and switch to GDM simultaneously.
             GLib.spawn_command_line_async(
                 'busctl --user set-property org.gnome.Mutter.DisplayConfig ' +
                 '/org/gnome/Mutter/DisplayConfig ' +
