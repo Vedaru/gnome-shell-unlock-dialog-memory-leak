@@ -290,14 +290,10 @@ export class ScreenShield extends Signals.EventEmitter {
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
 
-        if (!this._isLocked) {
-            // Blank display and switch to GDM simultaneously.
-            GLib.spawn_command_line_async(
-                'busctl --user set-property org.gnome.Mutter.DisplayConfig ' +
-                '/org/gnome/Mutter/DisplayConfig ' +
-                'org.gnome.Mutter.DisplayConfig PowerSaveMode i 1');
+        // Switch to GDM. GDM's own power settings blank the display
+        // (and can unblank it on input since GDM's Mutter owns the state).
+        if (!this._isLocked)
             GLib.spawn_command_line_async('loginctl lock-session');
-        }
     }
 
     _activateFade(lightbox, time) {
