@@ -289,11 +289,6 @@ export class ScreenShield extends Signals.EventEmitter {
 
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
-
-        // Switch to GDM. GDM's own power settings blank the display
-        // (and can unblank it on input since GDM's Mutter owns the state).
-        if (!this._isLocked)
-            GLib.spawn_command_line_async('loginctl lock-session');
     }
 
     _activateFade(lightbox, time) {
