@@ -2,7 +2,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 ===================================================================
 --- gnome-shell-50.1.orig/js/ui/screenShield.js
 +++ gnome-shell-50.1/js/ui/screenShield.js
-@@ -287,35 +287,11 @@ export class ScreenShield extends Signal
+@@ -287,35 +287,17 @@ export class ScreenShield extends Signal
          if (status !== GnomeSession.PresenceStatus.IDLE)
              return;
  
@@ -20,7 +20,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 +        // triggered (Super+L) or on suspend.
          if (this._activationTime === 0)
              this._activationTime = GLib.get_monotonic_time();
--
+ 
 -        const shouldLock = this._settings.get_boolean(LOCK_ENABLED_KEY) && !this._isLocked;
 -
 -        if (shouldLock) {
@@ -35,13 +35,17 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 -                    this.lock(false);
 -                });
 -            GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
--        }
++        // Delegate locking to GDM via systemd-logind.
++        // Equivalent to Super+L when disable-lock-screen=true.
++        if (!this._isLocked) {
++            GLib.spawn_command_line_async('loginctl lock-session');
+         }
 -
 -        this._activateFade(this._longLightbox, STANDARD_FADE_TIME);
      }
  
      _activateFade(lightbox, time) {
-@@ -492,6 +468,9 @@ export class ScreenShield extends Signal
+@@ -492,6 +474,9 @@ export class ScreenShield extends Signal
          this._lockScreenGroup.show();
          this._lockScreenState = MessageTray.State.SHOWING;
  
@@ -51,7 +55,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
          const fadeToBlack = params.fadeToBlack;
  
          if (params.animateLockScreen) {
-@@ -612,6 +591,9 @@ export class ScreenShield extends Signal
+@@ -612,6 +597,9 @@ export class ScreenShield extends Signal
  
          this.actor.hide();
  

@@ -292,6 +292,12 @@ export class ScreenShield extends Signals.EventEmitter {
         // triggered (Super+L) or on suspend.
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
+
+        // Delegate locking to GDM via systemd-logind.
+        // Equivalent to Super+L when disable-lock-screen=true.
+        if (!this._isLocked) {
+            GLib.spawn_command_line_async('loginctl lock-session');
+        }
     }
 
     _activateFade(lightbox, time) {
