@@ -1,67 +1,65 @@
-# GNOME Shell 50.1 — Memory Leak Fixes
+# GNOME Shell 50.1 — Memory Leak + DPMS Auto-Lock Fixes
 
-Three memory leaks fixed in the screen blank/lock/unlock cycle. Combined
-these stop ~1-10 MB RSS growth per cycle on GNOME Shell 50.1 (Ubuntu 26.04).
+## What this fixes
 
-## Leak 1: Unlock Dialog Destroy/Recreate (4-10 MB/cycle)
+Three memory leaks eliminated, DPMS-triggered auto-lock added:
 
-**File:** `screenShield.js`, `unlockDialog.js`
+| # | Issue | Fix |
+|---|---|---|
+| 1 | Unlock dialog destroyed each cycle | Reuse dialog (hide/show) |
+| 2 | Wallpaper texture retained across lock/unlock | Clear/restore CSS style |
+| 3 | Lightbox fade animation | Removed entirely (`_onStatusChanged` is now a no-op) |
 
-Every lock/unlock destroys and rebuilds the entire UnlockDialog widget tree
-(password entry, clock, notifications, background actors with GPU textures).
-GJS doesn't GC between cycles, so the old actor tree piles up in anonymous
-heap.
+## How DPMS auto-lock works
 
-**Fix:** Reuse the dialog — hide on deactivate, re-show on activate.
-Patch: `screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch`
+gnome-settings-daemon handles display power (DPMS). When the display blanks,
+Mutter's DisplayConfig `PowerSaveMode` property changes, triggering our handler
+to call `lock()`. On wake, `_wakeUpScreen()` shows the unlock dialog.
 
-## Leak 2: Lightbox Fade Animation (~1 MB/cycle)
+No gnome-shell actors are created during blanking -- zero memory allocation.
 
-**File:** `screenShield.js`
+## Configuration
 
-The idle-timeout fade-to-black uses a full-screen St.Widget (Lightbox) with
-`background-color: black`. Each show/hide cycle allocates Cairo surfaces and
-Cogl textures that are never freed.
-
-**Fix:** Skip the lightbox fade entirely, go directly to lock screen activation.
-Patch hunk in `0002-Fix-screen-blank-leaks-add-DPMS-auto-lock.patch`
-
-## Leak 3: Lock Screen Wallpaper Texture (~1 MB/cycle)
-
-**File:** `screenShield.js`
-
-The lock screen `_lockDialogGroup` has a CSS `background-image: url(...)`
-that St loads as a texture. The texture is retained after `actor.hide()`.
-
-**Fix:** Clear the CSS style on deactivate (`set_style(null)`), restore via
-`_refreshBackground()` on re-activate.
-Patch hunk in `0002-Fix-screen-blank-leaks-add-DPMS-auto-lock.patch`
-Related upstream: https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/9188
-
-## Feature: DPMS Auto-Lock
-
-**File:** `screenShield.js`
-
-Connects to Mutter's DisplayConfig `PowerSaveMode` property. When the
-display enters DPMS power-save (hardware blank), the screen auto-locks.
-When it wakes, the unlock dialog is shown. This bypasses the gnome-shell
-idle animation path entirely for screen blanking.
-
-Configuration after install:
 ```bash
-gsettings set org.gnome.desktop.session idle-delay 0
-gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 600
+# Idle detection timeout (must be > 0 for g-s-d to work)
+gsettings set org.gnome.desktop.session idle-delay 60
+
+# DPMS blank timeout after idle (seconds)
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-timeout 240
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-timeout 240
+gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'blank'
+
+# Enable locking
+gsettings set org.gnome.desktop.screensaver lock-enabled true
+gsettings set org.gnome.desktop.screensaver idle-activation-enabled true
+
+# Lock on suspend
+gsettings set org.gnome.desktop.screensaver ubuntu-lock-on-suspend true
 ```
 
-## Building & Installing
+Total time before display blanks + locks: `idle-delay + sleep-inactive-ac-timeout`
+(60s + 240s = 5 minutes in this example).
 
-See BUILD-INSTRUCTIONS.md. TL;DR:
+## Building
+
 ```bash
 apt source gnome-shell
 cd gnome-shell-50.1
-# Apply patches
+# Copy the patch into debian/patches/ubuntu/
+# Add it to debian/patches/series
 dpkg-buildpackage -us -uc -b
 sudo dpkg -i ../gnome-shell*.deb ../gnome-shell-common*.deb
 ```
 
 Alt+F2, `r` to restart shell.
+
+## Upstream
+
+Wallpaper texture leak: https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/9188
+
+## Files
+
+- `screenShield.js` — patched file (all fixes applied)
+- `DPMS-auto-lock-and-memory-leak-fixes.patch` — DPMS + wallpaper + fade fixes
+- `screenShield-reuse-unlock-dialog-to-fix-memory-leak.patch` — dialog reuse fix
+- `unlockDialog.js` — patched unlock dialog (dialog reuse fix)
