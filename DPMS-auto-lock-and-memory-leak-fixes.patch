@@ -38,7 +38,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
          this._syncInhibitor();
      }
  
-@@ -287,35 +316,9 @@ export class ScreenShield extends Signal
+@@ -287,35 +316,14 @@ export class ScreenShield extends Signal
          if (status !== GnomeSession.PresenceStatus.IDLE)
              return;
  
@@ -51,10 +51,12 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 -
 -        this._becomeModal();
 -
-+        // DPMS blank will trigger auto-lock via PowerSaveMode signal.
++        // Auto-lock immediately when session goes idle (no fade).
++        // DPMS blank will happen later via g-s-d and is handled
++        // by the PowerSaveMode signal in our DPMS proxy.
          if (this._activationTime === 0)
              this._activationTime = GLib.get_monotonic_time();
--
+ 
 -        const shouldLock = this._settings.get_boolean(LOCK_ENABLED_KEY) && !this._isLocked;
 -
 -        if (shouldLock) {
@@ -72,10 +74,12 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 -        }
 -
 -        this._activateFade(this._longLightbox, STANDARD_FADE_TIME);
++        if (!this._isLocked)
++            this.activate(false);
      }
  
      _activateFade(lightbox, time) {
-@@ -492,6 +495,9 @@ export class ScreenShield extends Signal
+@@ -492,6 +500,9 @@ export class ScreenShield extends Signal
          this._lockScreenGroup.show();
          this._lockScreenState = MessageTray.State.SHOWING;
  
@@ -85,7 +89,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
          const fadeToBlack = params.fadeToBlack;
  
          if (params.animateLockScreen) {
-@@ -612,6 +618,9 @@ export class ScreenShield extends Signal
+@@ -612,6 +623,9 @@ export class ScreenShield extends Signal
  
          this.actor.hide();
  

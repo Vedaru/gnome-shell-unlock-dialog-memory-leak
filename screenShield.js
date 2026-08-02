@@ -316,9 +316,14 @@ export class ScreenShield extends Signals.EventEmitter {
         if (status !== GnomeSession.PresenceStatus.IDLE)
             return;
 
-        // DPMS blank will trigger auto-lock via PowerSaveMode signal.
+        // Auto-lock immediately when session goes idle (no fade).
+        // DPMS blank will happen later via g-s-d and is handled
+        // by the PowerSaveMode signal in our DPMS proxy.
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
+
+        if (!this._isLocked)
+            this.activate(false);
     }
 
     _activateFade(lightbox, time) {
