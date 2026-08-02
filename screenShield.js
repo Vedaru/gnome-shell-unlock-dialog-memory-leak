@@ -287,15 +287,16 @@ export class ScreenShield extends Signals.EventEmitter {
         if (status !== GnomeSession.PresenceStatus.IDLE)
             return;
 
-        // Only track activation time. Display blanking via DPMS
-        // is handled by g-s-d. No lock screen unless manually
-        // triggered (Super+L) or on suspend.
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
 
-        // Delegate locking to GDM via systemd-logind.
-        // Equivalent to Super+L when disable-lock-screen=true.
         if (!this._isLocked) {
+            // Blank display via DPMS first, then delegate to GDM.
+            // On wake, GDM greeter will be showing.
+            GLib.spawn_command_line_async(
+                'busctl --user set-property org.gnome.Mutter.DisplayConfig ' +
+                '/org/gnome/Mutter/DisplayConfig ' +
+                'org.gnome.Mutter.DisplayConfig PowerSaveMode i 1');
             GLib.spawn_command_line_async('loginctl lock-session');
         }
     }

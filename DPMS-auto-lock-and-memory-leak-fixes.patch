@@ -2,7 +2,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 ===================================================================
 --- gnome-shell-50.1.orig/js/ui/screenShield.js
 +++ gnome-shell-50.1/js/ui/screenShield.js
-@@ -287,35 +287,17 @@ export class ScreenShield extends Signal
+@@ -287,35 +287,18 @@ export class ScreenShield extends Signal
          if (status !== GnomeSession.PresenceStatus.IDLE)
              return;
  
@@ -15,9 +15,6 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 -
 -        this._becomeModal();
 -
-+        // Only track activation time. Display blanking via DPMS
-+        // is handled by g-s-d. No lock screen unless manually
-+        // triggered (Super+L) or on suspend.
          if (this._activationTime === 0)
              this._activationTime = GLib.get_monotonic_time();
  
@@ -35,9 +32,13 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
 -                    this.lock(false);
 -                });
 -            GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
-+        // Delegate locking to GDM via systemd-logind.
-+        // Equivalent to Super+L when disable-lock-screen=true.
 +        if (!this._isLocked) {
++            // Blank display via DPMS first, then delegate to GDM.
++            // On wake, GDM greeter will be showing.
++            GLib.spawn_command_line_async(
++                'busctl --user set-property org.gnome.Mutter.DisplayConfig ' +
++                '/org/gnome/Mutter/DisplayConfig ' +
++                'org.gnome.Mutter.DisplayConfig PowerSaveMode i 1');
 +            GLib.spawn_command_line_async('loginctl lock-session');
          }
 -
@@ -45,7 +46,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
      }
  
      _activateFade(lightbox, time) {
-@@ -492,6 +474,9 @@ export class ScreenShield extends Signal
+@@ -492,6 +475,9 @@ export class ScreenShield extends Signal
          this._lockScreenGroup.show();
          this._lockScreenState = MessageTray.State.SHOWING;
  
@@ -55,7 +56,7 @@ Index: gnome-shell-50.1/js/ui/screenShield.js
          const fadeToBlack = params.fadeToBlack;
  
          if (params.animateLockScreen) {
-@@ -612,6 +597,9 @@ export class ScreenShield extends Signal
+@@ -612,6 +598,9 @@ export class ScreenShield extends Signal
  
          this.actor.hide();
  
