@@ -157,35 +157,6 @@ export class ScreenShield extends Signals.EventEmitter {
         this.idleMonitor = global.backend.get_core_idle_monitor();
         this._cursorTracker = global.backend.get_cursor_tracker();
 
-        // Lock on DPMS blank and wake on DPMS unblank.
-        this._dpmsProxy = new Gio.DBusProxy({
-            g_connection: Gio.DBus.session,
-            g_interface_name: 'org.gnome.Mutter.DisplayConfig',
-            g_interface_info: null,
-            g_name: 'org.gnome.Mutter.DisplayConfig',
-            g_object_path: '/org/gnome/Mutter/DisplayConfig',
-            g_flags: Gio.DBusProxyFlags.NONE,
-        });
-        this._dpmsProxy.init_async(
-            GLib.PRIORITY_DEFAULT, null)
-            .then(() => {
-                this._dpmsProxy.connect(
-                    'g-properties-changed', (proxy, changed) => {
-                        const props = changed.deep_unpack();
-                        if ('PowerSaveMode' in props) {
-                            const mode = props.PowerSaveMode.deep_unpack();
-                            if (mode !== 0 && !this._isLocked) {
-                                this.lock(false);
-                            } else if (mode === 0 && this._isLocked) {
-                                this._wakeUpScreen();
-                            }
-                        }
-                    });
-            })
-            .catch(e => log(
-                'Failed to init Mutter DisplayConfig proxy: ' +
-                e.message));
-
         this._syncInhibitor();
     }
 
@@ -316,14 +287,11 @@ export class ScreenShield extends Signals.EventEmitter {
         if (status !== GnomeSession.PresenceStatus.IDLE)
             return;
 
-        // Auto-lock immediately when session goes idle (no fade).
-        // DPMS blank will happen later via g-s-d and is handled
-        // by the PowerSaveMode signal in our DPMS proxy.
+        // Only track activation time. Display blanking via DPMS
+        // is handled by g-s-d. No lock screen unless manually
+        // triggered (Super+L) or on suspend.
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
-
-        if (!this._isLocked)
-            this.activate(false);
     }
 
     _activateFade(lightbox, time) {
