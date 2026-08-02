@@ -1,0 +1,97 @@
+Index: gnome-shell-50.1/js/ui/screenShield.js
+===================================================================
+--- gnome-shell-50.1.orig/js/ui/screenShield.js
++++ gnome-shell-50.1/js/ui/screenShield.js
+@@ -157,6 +157,35 @@ export class ScreenShield extends Signal
+         this.idleMonitor = global.backend.get_core_idle_monitor();
+         this._cursorTracker = global.backend.get_cursor_tracker();
+ 
++        // Lock on DPMS blank and wake on DPMS unblank.
++        this._dpmsProxy = new Gio.DBusProxy({
++            g_connection: Gio.DBus.session,
++            g_interface_name: 'org.gnome.Mutter.DisplayConfig',
++            g_interface_info: null,
++            g_name: 'org.gnome.Mutter.DisplayConfig',
++            g_object_path: '/org/gnome/Mutter/DisplayConfig',
++            g_flags: Gio.DBusProxyFlags.NONE,
++        });
++        this._dpmsProxy.init_async(
++            GLib.PRIORITY_DEFAULT, null)
++            .then(() => {
++                this._dpmsProxy.connect(
++                    'g-properties-changed', (proxy, changed) => {
++                        const props = changed.deep_unpack();
++                        if ('PowerSaveMode' in props) {
++                            const mode = props.PowerSaveMode.deep_unpack();
++                            if (mode !== 0 && !this._isLocked) {
++                                this.lock(false);
++                            } else if (mode === 0 && this._isLocked) {
++                                this._wakeUpScreen();
++                            }
++                        }
++                    });
++            })
++            .catch(e => log(
++                'Failed to init Mutter DisplayConfig proxy: ' +
++                e.message));
++
+         this._syncInhibitor();
+     }
+ 
+@@ -287,35 +316,9 @@ export class ScreenShield extends Signal
+         if (status !== GnomeSession.PresenceStatus.IDLE)
+             return;
+ 
+-        this._maybeCancelDialog();
+-
+-        if (this._longLightbox.visible) {
+-            // We're in the process of showing.
+-            return;
+-        }
+-
+-        this._becomeModal();
+-
++        // DPMS blank will trigger auto-lock via PowerSaveMode signal.
+         if (this._activationTime === 0)
+             this._activationTime = GLib.get_monotonic_time();
+-
+-        const shouldLock = this._settings.get_boolean(LOCK_ENABLED_KEY) && !this._isLocked;
+-
+-        if (shouldLock) {
+-            const lockTimeout = Math.max(
+-                adjustAnimationTime(STANDARD_FADE_TIME),
+-                this._settings.get_uint(LOCK_DELAY_KEY) * 1000);
+-            this._lockTimeoutId = GLib.timeout_add_once(
+-                GLib.PRIORITY_DEFAULT,
+-                lockTimeout,
+-                () => {
+-                    this._lockTimeoutId = 0;
+-                    this.lock(false);
+-                });
+-            GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
+-        }
+-
+-        this._activateFade(this._longLightbox, STANDARD_FADE_TIME);
+     }
+ 
+     _activateFade(lightbox, time) {
+@@ -492,6 +495,9 @@ export class ScreenShield extends Signal
+         this._lockScreenGroup.show();
+         this._lockScreenState = MessageTray.State.SHOWING;
+ 
++        // Restore background style cleared on deactivate.
++        this._refreshBackground();
++
+         const fadeToBlack = params.fadeToBlack;
+ 
+         if (params.animateLockScreen) {
+@@ -612,6 +618,9 @@ export class ScreenShield extends Signal
+ 
+         this.actor.hide();
+ 
++        // Clear background to free wallpaper texture.
++        this._lockDialogGroup.set_style(null);
++
+         if (this._becameActiveId !== 0) {
+             this.idleMonitor.remove_watch(this._becameActiveId);
+             this._becameActiveId = 0;

@@ -158,8 +158,6 @@ export class ScreenShield extends Signals.EventEmitter {
         this._cursorTracker = global.backend.get_cursor_tracker();
 
         // Lock on DPMS blank and wake on DPMS unblank.
-        // This replaces the leaky gnome-shell fade animation with
-        // hardware-level display power management for blanking.
         this._dpmsProxy = new Gio.DBusProxy({
             g_connection: Gio.DBus.session,
             g_interface_name: 'org.gnome.Mutter.DisplayConfig',
@@ -177,16 +175,16 @@ export class ScreenShield extends Signals.EventEmitter {
                         if ('PowerSaveMode' in props) {
                             const mode = props.PowerSaveMode.deep_unpack();
                             if (mode !== 0 && !this._isLocked) {
-                                // Display blanked via DPMS -- auto-lock
                                 this.lock(false);
                             } else if (mode === 0 && this._isLocked) {
-                                // Display woke up -- show unlock dialog
                                 this._wakeUpScreen();
                             }
                         }
                     });
             })
-            .catch(e => log('Failed to init DPMS proxy: ' + e.message));
+            .catch(e => log(
+                'Failed to init Mutter DisplayConfig proxy: ' +
+                e.message));
 
         this._syncInhibitor();
     }
@@ -318,35 +316,9 @@ export class ScreenShield extends Signals.EventEmitter {
         if (status !== GnomeSession.PresenceStatus.IDLE)
             return;
 
-        this._maybeCancelDialog();
-
-        if (this._longLightbox.visible) {
-            // We're in the process of showing.
-            return;
-        }
-
-        this._becomeModal();
-
+        // DPMS blank will trigger auto-lock via PowerSaveMode signal.
         if (this._activationTime === 0)
             this._activationTime = GLib.get_monotonic_time();
-
-        const shouldLock = this._settings.get_boolean(LOCK_ENABLED_KEY) && !this._isLocked;
-
-        if (shouldLock) {
-            const lockTimeout = this._settings.get_uint(LOCK_DELAY_KEY) * 1000;
-            this._lockTimeoutId = GLib.timeout_add_once(
-                GLib.PRIORITY_DEFAULT,
-                lockTimeout,
-                () => {
-                    this._lockTimeoutId = 0;
-                    this.lock(false);
-                });
-            GLib.Source.set_name_by_id(this._lockTimeoutId, '[gnome-shell] this.lock');
-        }
-
-        // Skip the dimming fade animation (lightbox) entirely.
-        // It leaks ~1MB per blank cycle in St paint resources.
-        this.activate(false);
     }
 
     _activateFade(lightbox, time) {
@@ -523,7 +495,7 @@ export class ScreenShield extends Signals.EventEmitter {
         this._lockScreenGroup.show();
         this._lockScreenState = MessageTray.State.SHOWING;
 
-        // Restore background style cleared on deactivate to free wallpaper.
+        // Restore background style cleared on deactivate.
         this._refreshBackground();
 
         const fadeToBlack = params.fadeToBlack;
@@ -646,8 +618,7 @@ export class ScreenShield extends Signals.EventEmitter {
 
         this.actor.hide();
 
-        // Clear lock screen background to free cached wallpaper texture.
-        // Restored by _refreshBackground() when lock screen activates.
+        // Clear background to free wallpaper texture.
         this._lockDialogGroup.set_style(null);
 
         if (this._becameActiveId !== 0) {
